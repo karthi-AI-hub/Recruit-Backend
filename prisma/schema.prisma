@@ -1,0 +1,397 @@
+// Prisma Schema for Recurite Job Portal
+// Based on BACKEND_DATABASE_SCHEMA.md
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── ENUMS ──────────────────────────────────────────────
+
+enum UserRole {
+  job_seeker
+  recruiter
+  admin
+}
+
+enum JobStatus {
+  active
+  closed
+  draft
+}
+
+enum JobType {
+  full_time
+  part_time
+  contract
+  internship
+  freelance
+}
+
+enum ApplicationStatus {
+  applied
+  in_review
+  shortlisted
+  interviewed
+  offered
+  rejected
+  withdrawn
+  hired
+}
+
+enum NotificationType {
+  application
+  interview
+  message
+  info
+  system
+}
+
+// ─── MODELS ─────────────────────────────────────────────
+
+model User {
+  id              String    @id @default(uuid())
+  email           String    @unique
+  passwordHash    String    @map("password_hash")
+  name            String
+  phone           String?
+  role            UserRole
+  profileImage    String?   @map("profile_image")
+
+  // Job seeker fields
+  headline        String?
+  location        String?
+  experience      Int       @default(0)
+  skills          String[]  @default([])
+  resumeUrl       String?   @map("resume_url")
+  currentCompany  String?   @map("current_company")
+  currentDesignation String? @map("current_designation")
+  expectedSalary  Float?    @map("expected_salary")
+  isAvailable     Boolean   @default(true) @map("is_available")
+  noticePeriod    String?   @map("notice_period")
+  currentCtc      String?   @map("current_ctc")
+  isProfileHidden Boolean   @default(false) @map("is_profile_hidden")
+
+  // Recruiter fields
+  companyId       String?   @map("company_id")
+  company         Company?  @relation(fields: [companyId], references: [id])
+
+  // Refresh token for JWT
+  refreshToken    String?   @map("refresh_token")
+
+  // Timestamps
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  postedJobs      Job[]           @relation("PostedBy")
+  applications    Application[]   @relation("Applicant")
+  sentMessages    Message[]       @relation("MessageSender")
+  receivedMessages Message[]      @relation("MessageReceiver")
+  notifications   Notification[]
+  savedJobs       SavedJob[]
+  templates       MessageTemplate[]
+
+  // Chat relations
+  recruiterConversations Conversation[] @relation("RecruiterConversation")
+  candidateConversations Conversation[] @relation("CandidateConversation")
+  chatMessages    ChatMessage[]
+
+  // Extended profile fields
+  summary         String?
+  about           String?
+  github          String?
+  linkedIn        String?
+  portfolio       String?
+  
+  workExperience  WorkExperience[]
+  education       Education[]
+  certifications  String[]  @default([])
+
+  // Preferences & settings (synced to backend)
+  preferences       Json?     @default("{}")
+  blockedCompanies  String[]  @default([]) @map("blocked_companies")
+
+  // Feedback & Invites
+  feedbacks       Feedback[]
+  sentInvites     TeamInvite[]  @relation("InviteSender")
+
+  @@map("users")
+  @@index([email])
+  @@index([role])
+}
+
+model Company {
+  id              String    @id @default(uuid())
+  name            String
+  logo            String?
+  industry        String
+  location        String
+  description     String?
+  employeeCount   Int       @default(0) @map("employee_count")
+  website         String?
+  rating          Float     @default(0)
+  reviewCount     Int       @default(0) @map("review_count")
+  jobCount        Int       @default(0) @map("job_count")
+
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  users           User[]
+  jobs            Job[]
+  teamInvites     TeamInvite[]
+
+  @@map("companies")
+}
+
+model Job {
+  id              String    @id @default(uuid())
+  title           String
+  description     String
+  location        String
+  salaryMin       Float?    @map("salary_min")
+  salaryMax       Float?    @map("salary_max")
+  minExperience   Int       @default(0) @map("min_experience")
+  maxExperience   Int       @default(0) @map("max_experience")
+  skills          String[]  @default([])
+  requirements    String[]  @default([])
+  jobType         JobType   @default(full_time) @map("job_type")
+  employmentType  String?   @map("employment_type")
+  isRemote        Boolean   @default(false) @map("is_remote")
+  isHotJob        Boolean   @default(false) @map("is_hot_job")
+  status          JobStatus @default(active)
+  applicants      Int       @default(0)
+  views           Int       @default(0)
+  isDeleted       Boolean   @default(false) @map("is_deleted")
+  
+  // Full-text search vector (unsupported by Prisma schema directly, handled via raw SQL migration)
+  searchVector    Unsupported("tsvector")? @map("search_vector")
+
+  // Company reference
+  companyId       String?   @map("company_id")
+  company         Company?  @relation(fields: [companyId], references: [id])
+  companyName     String    @map("company_name")
+  companyLogo     String?   @map("company_logo")
+  companyDescription String? @map("company_description")
+
+  // Posted by (recruiter)
+  postedById      String    @map("posted_by_id")
+  postedBy        User      @relation("PostedBy", fields: [postedById], references: [id])
+
+  // Timestamps
+  postedDate      DateTime  @default(now()) @map("posted_date")
+  expiresAt       DateTime? @map("expires_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  applications    Application[]
+  savedJobs       SavedJob[]
+  conversations   Conversation[]
+
+  @@index([status, postedDate(sort: Desc)])
+  @@index([location])
+  @@index([jobType])
+  @@index([postedById])
+  @@map("jobs")
+}
+
+model Application {
+  id              String            @id @default(uuid())
+  jobId           String            @map("job_id")
+  job             Job               @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  userId          String            @map("user_id")
+  user            User              @relation("Applicant", fields: [userId], references: [id], onDelete: Cascade)
+  applicantName   String?           @map("applicant_name")
+  status          ApplicationStatus @default(applied)
+  coverLetter     String?           @map("cover_letter")
+  recruiterMessage String?          @map("recruiter_message")
+  appliedDate     DateTime          @default(now()) @map("applied_date")
+  updatedAt       DateTime          @updatedAt @map("updated_at")
+
+  @@unique([jobId, userId]) // One application per job per user
+  @@index([userId])
+  @@index([jobId])
+  @@index([status])
+  @@map("applications")
+}
+
+model Message {
+  id              String    @id @default(uuid())
+  templateId      String?   @map("template_id")
+  fromUserId      String    @map("from_user_id")
+  from            User      @relation("MessageSender", fields: [fromUserId], references: [id])
+  toUserId        String    @map("to_user_id")
+  to              User      @relation("MessageReceiver", fields: [toUserId], references: [id])
+  subject         String
+  body            String
+  isRead          Boolean   @default(false) @map("is_read")
+  sentAt          DateTime  @default(now()) @map("sent_at")
+
+  @@index([toUserId, isRead])
+  @@index([fromUserId])
+  @@map("messages")
+}
+
+model MessageTemplate {
+  id              String    @id @default(uuid())
+  title           String
+  body            String
+  placeholders    String[]  @default([])
+  category        String?
+  isDefault       Boolean   @default(false) @map("is_default")
+  createdById     String    @map("created_by_id")
+  createdBy       User      @relation(fields: [createdById], references: [id])
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  @@map("message_templates")
+}
+
+model Notification {
+  id              String           @id @default(uuid())
+  userId          String           @map("user_id")
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title           String
+  message         String
+  type            NotificationType @default(info)
+  isRead          Boolean          @default(false) @map("is_read")
+  metadata        Json?            // Extra data (e.g., jobId, applicationId)
+  createdAt       DateTime         @default(now()) @map("created_at")
+
+  @@index([userId, isRead])
+  @@map("notifications")
+}
+
+model SavedJob {
+  id              String    @id @default(uuid())
+  userId          String    @map("user_id")
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jobId           String    @map("job_id")
+  job             Job       @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  savedAt         DateTime  @default(now()) @map("saved_at")
+
+  @@unique([userId, jobId])
+  @@map("saved_jobs")
+}
+
+// ─── CHAT MODELS ────────────────────────────────────────
+
+model Conversation {
+  id              String    @id @default(uuid())
+  recruiterId     String    @map("recruiter_id")
+  recruiter       User      @relation("RecruiterConversation", fields: [recruiterId], references: [id])
+  candidateId     String    @map("candidate_id")
+  candidate       User      @relation("CandidateConversation", fields: [candidateId], references: [id])
+  jobId           String?   @map("job_id")
+  job             Job?      @relation(fields: [jobId], references: [id])
+  jobTitle        String?   @map("job_title")
+  lastMessage     String?   @map("last_message")
+  lastMessageAt   DateTime? @map("last_message_at")
+  lastMessageBy   String?   @map("last_message_by")
+  unreadRecruiter Int       @default(0) @map("unread_recruiter")
+  unreadCandidate Int       @default(0) @map("unread_candidate")
+  isActive        Boolean   @default(true) @map("is_active")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  messages        ChatMessage[]
+
+  @@unique([recruiterId, candidateId, jobId])
+  @@index([recruiterId])
+  @@index([candidateId])
+  @@map("conversations")
+}
+
+model ChatMessage {
+  id              String    @id @default(uuid())
+  conversationId  String    @map("conversation_id")
+  conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderId        String    @map("sender_id")
+  sender          User      @relation(fields: [senderId], references: [id])
+  senderName      String    @map("sender_name")
+  text            String
+  type            String    @default("text") // text, image, file, system
+  status          String    @default("sent") // sending, sent, delivered, read
+  readAt          DateTime? @map("read_at")
+  attachmentUrl   String?   @map("attachment_url")
+  attachmentName  String?   @map("attachment_name")
+  sentAt          DateTime  @default(now()) @map("sent_at")
+
+  @@index([conversationId, sentAt])
+  @@map("chat_messages")
+}
+
+model WorkExperience {
+  id          String    @id @default(uuid())
+  userId      String    @map("user_id")
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company     String
+  designation String
+  location    String?
+  startDate   DateTime  @map("start_date")
+  endDate     DateTime? @map("end_date")
+  isCurrent   Boolean   @default(false) @map("is_current")
+  description String?
+  
+  @@map("work_experiences")
+}
+
+model Education {
+  id          String    @id @default(uuid())
+  userId      String    @map("user_id")
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  degree      String
+  institution String
+  field       String
+  startYear   DateTime  @map("start_year")
+  endYear     DateTime  @map("end_year")
+  grade       String?
+  location    String?
+  
+  @@map("educations")
+}
+
+model Skill {
+  id         String   @id @default(uuid())
+  name       String   @unique
+  category   String?
+  usageCount Int      @default(0) @map("usage_count")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([name])
+  @@index([usageCount(sort: Desc)])
+  @@map("skills")
+}
+
+model Feedback {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id])
+  category  String
+  rating    Int      @default(0)
+  message   String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("feedbacks")
+}
+
+model TeamInvite {
+  id          String   @id @default(uuid())
+  companyId   String   @map("company_id")
+  company     Company  @relation(fields: [companyId], references: [id])
+  invitedBy   String   @map("invited_by")
+  inviter     User     @relation("InviteSender", fields: [invitedBy], references: [id])
+  email       String
+  role        String   @default("Member")
+  status      String   @default("pending")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@unique([companyId, email])
+  @@map("team_invites")
+}
