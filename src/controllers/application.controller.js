@@ -120,6 +120,16 @@ const getMyApplications = asyncHandler(async (req, res) => {
                         salaryMax: true,
                     },
                 },
+                user: {
+                    select: {
+                        id: true,
+                        name: true,
+                        email: true,
+                        phone: true,
+                        profileImage: true,
+                        headline: true,
+                    },
+                },
             },
         }),
         prisma.application.count({ where }),

@@ -15,15 +15,26 @@ const startConversation = asyncHandler(async (req, res) => {
     }
 
     // Check if conversation already exists
-    let conversation = await prisma.conversation.findUnique({
-        where: {
-            recruiterId_candidateId_jobId: {
+    let conversation;
+    if (jobId) {
+        conversation = await prisma.conversation.findUnique({
+            where: {
+                recruiterId_candidateId_jobId: {
+                    recruiterId,
+                    candidateId,
+                    jobId
+                }
+            }
+        });
+    } else {
+        conversation = await prisma.conversation.findFirst({
+            where: {
                 recruiterId,
                 candidateId,
-                jobId: jobId || null // Handle optional jobId if unique constraint allows null
+                jobId: null
             }
-        }
-    });
+        });
+    }
 
     // Note: If unique constraint includes jobId and jobId can be null, we need to be careful.
     // The schema says @@unique([recruiterId, candidateId, jobId]).

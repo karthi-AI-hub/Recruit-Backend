@@ -58,8 +58,19 @@ const sendBulkMessages = asyncHandler(async (req, res) => {
         throw ApiError.badRequest('subject and body are required');
     }
 
+    // ── Safety Check: Filter only existing users ─────────────────────────
+    const existingUsers = await prisma.user.findMany({
+        where: { id: { in: toUserIds } },
+        select: { id: true }
+    });
+    const validUserIds = existingUsers.map(u => u.id);
+
+    if (validUserIds.length === 0) {
+        throw ApiError.notFound('No valid recipients found');
+    }
+
     const messages = [];
-    for (const toUserId of toUserIds) {
+    for (const toUserId of validUserIds) {
         // Replace placeholders in body if needed
         let personalizedBody = body;
         if (placeholders) {

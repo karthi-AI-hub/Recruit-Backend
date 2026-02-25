@@ -186,6 +186,24 @@ const getAnalytics = asyncHandler(async (req, res) => {
 const searchCandidates = asyncHandler(async (req, res) => {
     const { search, skills, location, minExperience, maxExperience, page, limit } = req.query;
 
+    // ── Subscription Guard ──────────────────────────────────
+    const recruiter = await prisma.user.findUnique({
+        where: { id: req.user.id },
+        include: { company: true },
+    });
+
+    if (!recruiter.companyId || !recruiter.company) {
+        throw ApiError.forbidden('You must create a company profile before searching candidates');
+    }
+
+    const { subscriptionStatus, trialEndsAt } = recruiter.company;
+    const isActive = subscriptionStatus === 'active' || subscriptionStatus === 'trialing';
+    const isExpired = trialEndsAt && new Date(trialEndsAt) < new Date();
+
+    if (!isActive || isExpired) {
+        throw ApiError.forbidden('An active subscription is required to search candidates. Please subscribe first.');
+    }
+
     const where = { role: 'job_seeker', isProfileHidden: false };
 
     if (search) {

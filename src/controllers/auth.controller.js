@@ -94,7 +94,14 @@ const login = asyncHandler(async (req, res) => {
         where: { email },
         include: {
             company: {
-                select: { id: true, name: true, logo: true },
+                select: {
+                    id: true,
+                    name: true,
+                    logo: true,
+                    subscriptionPlan: true,
+                    subscriptionStatus: true,
+                    trialEndsAt: true,
+                },
             },
         },
     });
@@ -218,6 +225,9 @@ const getMe = asyncHandler(async (req, res) => {
                     logo: true,
                     industry: true,
                     location: true,
+                    subscriptionPlan: true,
+                    subscriptionStatus: true,
+                    trialEndsAt: true,
                 },
             },
             createdAt: true,

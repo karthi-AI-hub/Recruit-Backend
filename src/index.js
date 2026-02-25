@@ -24,6 +24,7 @@ const savedJobRoutes = require('./routes/savedJobs.routes');
 const recruiterRoutes = require('./routes/recruiter.routes');
 const skillRoutes = require('./routes/skills.routes');
 const feedbackRoutes = require('./routes/feedback.routes');
+const subscriptionRoutes = require('./routes/subscription.routes');
 
 // Import middleware
 const errorHandler = require('./middleware/errorHandler');
@@ -38,8 +39,7 @@ const server = http.createServer(app);
 // ─── SOCKET.IO ──────────────────────────────────────────
 const io = new Server(server, {
     cors: {
-        origin: '*', // Allow Flutter app connections
-        methods: ['GET', 'POST'],
+        origin: '*',
     },
 });
 
@@ -100,6 +100,7 @@ app.use('/api/saved-jobs', savedJobRoutes);
 app.use('/api/recruiter', recruiterRoutes);
 app.use('/api/skills', skillRoutes);
 app.use('/api/feedback', feedbackRoutes);
+app.use('/api/subscription', subscriptionRoutes);
 app.use('/api/chat', require('./routes/chat.routes')); // Added Chat Routes
 
 // Health check

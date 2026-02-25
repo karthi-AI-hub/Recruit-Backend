@@ -93,7 +93,7 @@ const getJobs = asyncHandler(async (req, res) => {
 
     const pagination = paginate(req.query);
 
-    const [jobs, total] = await Promise.all([
+    let [jobs, total] = await Promise.all([
         prisma.job.findMany({
             where,
             orderBy,
@@ -107,6 +107,27 @@ const getJobs = asyncHandler(async (req, res) => {
         }),
         prisma.job.count({ where }),
     ]);
+
+    // Fallback: If personalized feed yields 0 results, show all jobs instead
+    if (jobs.length === 0 && userSkills.length > 0 && !search) {
+        delete where.skills;
+        const [fallbackJobs, fallbackTotal] = await Promise.all([
+            prisma.job.findMany({
+                where,
+                orderBy,
+                skip: pagination.skip,
+                take: pagination.take,
+                include: {
+                    company: {
+                        select: { id: true, name: true, logo: true, rating: true },
+                    },
+                },
+            }),
+            prisma.job.count({ where }),
+        ]);
+        jobs = fallbackJobs;
+        total = fallbackTotal;
+    }
 
     const response = {
         success: true,
@@ -187,6 +208,16 @@ const searchJobs = asyncHandler(async (req, res) => {
     const searchQuery = q.trim().split(/\s+/).join(' & '); // "React Native" -> "React & Native"
     const pagination = paginate(req.query);
 
+    // Get user's applied job IDs to exclude them
+    let excludeJobIds = [];
+    if (req.user) {
+        const applications = await prisma.application.findMany({
+            where: { userId: req.user.id },
+            select: { jobId: true }
+        });
+        excludeJobIds = applications.map(app => app.jobId);
+    }
+
     // Raw SQL for Full-Text Search
     const jobs = await prisma.$queryRaw`
         SELECT id, title, description, company_name as "companyName", location, "salary_min" as "salaryMin", "salary_max" as "salaryMax", 
@@ -194,6 +225,7 @@ const searchJobs = asyncHandler(async (req, res) => {
         FROM jobs
         WHERE status = 'active' 
           AND "is_deleted" = false
+          ${excludeJobIds.length > 0 ? prisma.raw(`AND id NOT IN (${excludeJobIds.map(id => `'${id}'`).join(',')})`) : prisma.raw('')}
           AND "search_vector" @@ to_tsquery('english', ${searchQuery})
         ORDER BY ts_rank("search_vector", to_tsquery('english', ${searchQuery})) DESC
         LIMIT ${pagination.take} OFFSET ${pagination.skip};
@@ -205,6 +237,7 @@ const searchJobs = asyncHandler(async (req, res) => {
         FROM jobs
         WHERE status = 'active' 
           AND "is_deleted" = false
+          ${excludeJobIds.length > 0 ? prisma.raw(`AND id NOT IN (${excludeJobIds.map(id => `'${id}'`).join(',')})`) : prisma.raw('')}
           AND "search_vector" @@ to_tsquery('english', ${searchQuery});
     `;
 
@@ -222,6 +255,24 @@ const searchJobs = asyncHandler(async (req, res) => {
  */
 const createJob = asyncHandler(async (req, res) => {
     const data = req.body;
+
+    // ── Subscription Guard ──────────────────────────────────
+    const recruiter = await prisma.user.findUnique({
+        where: { id: req.user.id },
+        include: { company: true },
+    });
+
+    if (!recruiter.companyId || !recruiter.company) {
+        throw ApiError.forbidden('You must create a company profile before posting jobs');
+    }
+
+    const { subscriptionStatus, trialEndsAt } = recruiter.company;
+    const isActive = subscriptionStatus === 'active' || subscriptionStatus === 'trialing';
+    const isExpired = trialEndsAt && new Date(trialEndsAt) < new Date();
+
+    if (!isActive || isExpired) {
+        throw ApiError.forbidden('An active subscription is required to post jobs. Please subscribe first.');
+    }
 
     if (!data.title || !data.description) {
         throw ApiError.badRequest('title and description are required');
