@@ -138,6 +138,11 @@ model Company {
   reviewCount     Int       @default(0) @map("review_count")
   jobCount        Int       @default(0) @map("job_count")
 
+  // Subscription Details
+  subscriptionPlan   String?   @map("subscription_plan")
+  subscriptionStatus String    @default("inactive") @map("subscription_status")
+  trialEndsAt        DateTime? @map("trial_ends_at")
+
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")
 

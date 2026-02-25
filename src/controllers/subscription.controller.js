@@ -52,8 +52,8 @@ const subscribe = asyncHandler(async (req, res) => {
     await prisma.company.update({
         where: { id: user.companyId },
         data: {
-            subscriptionPlan: `${planName} (${billingCycle})`,
-            subscriptionStatus: 'active',
+            subscription_plan: `${planName} (${billingCycle})`,
+            subscription_status: 'active',
             trialEndsAt: planEndsAt,
         },
     });
@@ -98,8 +98,8 @@ const startTrial = asyncHandler(async (req, res) => {
     await prisma.company.update({
         where: { id: user.companyId },
         data: {
-            subscriptionPlan: 'Free Trial',
-            subscriptionStatus: 'trialing',
+            subscription_plan: 'Free Trial',
+            subscription_status: 'trialing',
             trialEndsAt,
         },
     });
@@ -162,7 +162,7 @@ const getStatus = asyncHandler(async (req, res) => {
         data: {
             hasCompany: true,
             companyId: user.companyId,
-            planName: user.company.subscriptionPlan,
+            planName: user.company.subscription_plan,
             status,
             trialEndsAt: user.company.trialEndsAt,
         },
