@@ -1,6 +1,5 @@
 node_modules/
 uploads/
-prisma/migrations/
 *.log
 dist/
 
@@ -13,3 +12,4 @@ dist/
 *.jks
 *.keystore
 src/config/firebaseServiceAccountKey.json
+.env

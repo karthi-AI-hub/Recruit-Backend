@@ -55,6 +55,7 @@ setIO(io);
 initChatSocket(io);
 
 // ─── MIDDLEWARE ──────────────────────────────────────────
+app.set('trust proxy', 1); // Trust first proxy (Render, Railway, etc.)
 app.use(require('compression')()); // Gzip compression
 app.use(helmet({
     crossOriginResourcePolicy: { policy: 'cross-origin' },
