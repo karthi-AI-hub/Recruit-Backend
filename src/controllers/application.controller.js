@@ -3,12 +3,14 @@ const asyncHandler = require('../utils/asyncHandler');
 const ApiError = require('../utils/ApiError');
 const { paginate, paginationMeta } = require('../utils/pagination');
 const { invalidateCache } = require('../middleware/cache.middleware');
+const { createNotification } = require('../utils/notificationHelper');
+const { canViewDirectContact } = require('../utils/subscriptionAccess');
 
 /**
  * POST /api/applications — Job seeker applies (auth required → 401 triggers login modal)
  */
 const createApplication = asyncHandler(async (req, res) => {
-    const { jobId, coverLetter } = req.body;
+    const { jobId, coverLetter,resumeUrl } = req.body;
 
     if (!jobId) {
         throw ApiError.badRequest('jobId is required');
@@ -28,8 +30,13 @@ const createApplication = asyncHandler(async (req, res) => {
     // Get user for applicant name
     const user = await prisma.user.findUnique({
         where: { id: req.user.id },
-        select: { name: true },
+        select: { name: true, resumeUrl: true },
     });
+    const applicationResumeUrl = resumeUrl || user?.resumeUrl;
+
+    if (!applicationResumeUrl) {
+        throw ApiError.badRequest('A resume is required to apply for this job');
+    }
 
     // Create application
     const application = await prisma.application.create({
@@ -37,6 +44,7 @@ const createApplication = asyncHandler(async (req, res) => {
             jobId,
             userId: req.user.id,
             applicantName: user?.name,
+            resumeUrl: applicationResumeUrl,
             coverLetter,
         },
         include: {
@@ -58,15 +66,13 @@ const createApplication = asyncHandler(async (req, res) => {
         data: { applicants: { increment: 1 } },
     });
 
-    // Create notification for recruiter
-    await prisma.notification.create({
-        data: {
-            userId: job.postedById,
-            title: 'New Application',
-            message: `${user?.name || 'Someone'} applied for ${job.title}`,
-            type: 'application',
-            metadata: { jobId: job.id, applicationId: application.id },
-        },
+    // Create notification for recruiter (DB + socket + push)
+    await createNotification({
+        userId: job.postedById,
+        title: 'New Application',
+        message: `${user?.name || 'Someone'} applied for ${job.title}`,
+        type: 'application',
+        metadata: { jobId: job.id, applicationId: application.id },
     });
 
     await invalidateCache(`apps:user:${req.user.id}`);
@@ -173,6 +179,15 @@ const getApplicationById = asyncHandler(async (req, res) => {
                     resumeUrl: true,
                     currentCompany: true,
                     currentDesignation: true,
+                    about: true,
+                    summary: true,
+                    linkedIn: true,
+                    github: true,
+                    portfolio: true,
+                    noticePeriod: true,
+                    expectedSalary: true,
+                    workExperience: true,
+                    education: true,
                 },
             },
         },
@@ -185,9 +200,30 @@ const getApplicationById = asyncHandler(async (req, res) => {
         throw ApiError.forbidden('Access denied');
     }
 
+    let responseData = application;
+    if (application.job.postedById === req.user.id) {
+        const recruiter = await prisma.user.findUnique({
+            where: { id: req.user.id },
+            include: { company: true },
+        });
+
+        if (!canViewDirectContact(recruiter?.company)) {
+            responseData = {
+                ...application,
+                user: application.user
+                    ? {
+                        ...application.user,
+                        email: null,
+                        phone: null,
+                    }
+                    : application.user,
+            };
+        }
+    }
+
     res.json({
         success: true,
-        data: application,
+        data: responseData,
     });
 });
 
@@ -202,6 +238,12 @@ const getJobApplications = asyncHandler(async (req, res) => {
     const job = await prisma.job.findUnique({ where: { id: req.params.jobId } });
     if (!job) throw ApiError.notFound('Job not found');
     if (job.postedById !== req.user.id) throw ApiError.forbidden('Not your job');
+
+    const recruiter = await prisma.user.findUnique({
+        where: { id: req.user.id },
+        include: { company: true },
+    });
+    const allowDirectContact = canViewDirectContact(recruiter?.company);
 
     const where = { jobId: req.params.jobId };
     if (status) where.status = status;
@@ -226,6 +268,16 @@ const getJobApplications = asyncHandler(async (req, res) => {
                         skills: true,
                         resumeUrl: true,
                         currentCompany: true,
+                        currentDesignation: true,
+                        about: true,
+                        summary: true,
+                        linkedIn: true,
+                        github: true,
+                        portfolio: true,
+                        noticePeriod: true,
+                        expectedSalary: true,
+                        workExperience: true,
+                        education: true,
                     },
                 },
             },
@@ -233,9 +285,25 @@ const getJobApplications = asyncHandler(async (req, res) => {
         prisma.application.count({ where }),
     ]);
 
+    const sanitizedApplications = allowDirectContact
+        ? applications
+        : applications.map((application) => ({
+            ...application,
+            user: application.user
+                ? {
+                    ...application.user,
+                    email: null,
+                    phone: null,
+                }
+                : application.user,
+        }));
+
     res.json({
         success: true,
-        data: applications,
+        data: sanitizedApplications,
+        access: {
+            canViewDirectContact: allowDirectContact,
+        },
         pagination: paginationMeta(total, pagination.page, pagination.limit),
     });
 });
@@ -277,14 +345,12 @@ const updateApplicationStatus = asyncHandler(async (req, res) => {
         hired: 'has been accepted',
     };
 
-    await prisma.notification.create({
-        data: {
-            userId: application.userId,
-            title: 'Application Update',
-            message: `Your application for ${application.job.title} ${statusLabels[status] || 'has been updated'}`,
-            type: 'application',
-            metadata: { applicationId: application.id, jobId: application.jobId },
-        },
+    await createNotification({
+        userId: application.userId,
+        title: 'Application Update',
+        message: `Your application for ${application.job.title} ${statusLabels[status] || 'has been updated'}`,
+        type: 'application',
+        metadata: { applicationId: application.id, jobId: application.jobId },
     });
 
     await invalidateCache(`apps:user:${application.userId}`);

@@ -23,9 +23,20 @@ const storage = multer.diskStorage({
         cb(null, dir);
     },
     filename: (req, file, cb) => {
-        const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
         const ext = path.extname(file.originalname);
-        cb(null, `${file.fieldname}-${uniqueSuffix}${ext}`);
+        const safeEmail = req.user?.email
+            ? String(req.user.email)
+                .trim()
+                .toLowerCase()
+                .replace('@', '_at_')
+                .replace(/[^a-z0-9._-]/g, '_')
+            : null;
+
+        if (safeEmail) {
+            return cb(null, `${safeEmail}_${file.fieldname}${ext}`);
+        }
+
+        cb(null, `${file.fieldname}${ext}`);
     },
 });
 

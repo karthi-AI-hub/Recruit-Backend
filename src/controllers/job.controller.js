@@ -3,6 +3,8 @@ const asyncHandler = require('../utils/asyncHandler');
 const ApiError = require('../utils/ApiError');
 const { paginate, paginationMeta } = require('../utils/pagination');
 const { redis } = require('../config/redis');
+const { isCompanyProfileComplete } = require('../utils/companyProfile');
+const { normalizeSkillList, expandSkillQueryToCanonicalSkills } = require('../utils/skillNormalization');
 
 const CACHE_TTL = 300; // 5 minutes
 
@@ -22,7 +24,10 @@ const getJobs = asyncHandler(async (req, res) => {
         });
         if (user) {
             userAppliedJobIds = user.applications.map(a => a.jobId);
-            userSkills = user.skills || [];
+            userSkills = await normalizeSkillList(user.skills || [], {
+                createMissing: false,
+                incrementUsage: false,
+            });
         }
     }
 
@@ -71,11 +76,14 @@ const getJobs = asyncHandler(async (req, res) => {
     }
 
     if (search) {
+        const matchedSkills = await expandSkillQueryToCanonicalSkills(search, {
+            limitPerToken: 10,
+        });
         where.OR = [
             { title: { contains: search, mode: 'insensitive' } },
             { description: { contains: search, mode: 'insensitive' } },
             { companyName: { contains: search, mode: 'insensitive' } },
-            { skills: { hasSome: [search] } },
+            ...(matchedSkills.length > 0 ? [{ skills: { hasSome: matchedSkills } }] : []),
         ];
     }
 
@@ -266,6 +274,10 @@ const createJob = asyncHandler(async (req, res) => {
         throw ApiError.forbidden('You must create a company profile before posting jobs');
     }
 
+    if (!isCompanyProfileComplete(recruiter.company)) {
+        throw ApiError.forbidden('Complete your company profile before posting jobs');
+    }
+
     const { subscriptionStatus, trialEndsAt } = recruiter.company;
     const isActive = subscriptionStatus === 'active' || subscriptionStatus === 'trialing';
     const isExpired = trialEndsAt && new Date(trialEndsAt) < new Date();
@@ -278,11 +290,30 @@ const createJob = asyncHandler(async (req, res) => {
         throw ApiError.badRequest('title and description are required');
     }
 
+    if (data.skills) {
+        data.skills = await normalizeSkillList(data.skills, {
+            createMissing: true,
+            incrementUsage: true,
+        });
+    }
+
+    // Normalize requirements & benefits to String[] arrays
+    if (data.requirements && typeof data.requirements === 'string') {
+        data.requirements = data.requirements.split(',').map(s => s.trim()).filter(Boolean);
+    }
+    if (data.benefits && typeof data.benefits === 'string') {
+        data.benefits = data.benefits.split(',').map(s => s.trim()).filter(Boolean);
+    }
+
+    const { company } = recruiter;
     const job = await prisma.job.create({
         data: {
             ...data,
             postedById: req.user.id,
-            companyId: req.user.companyId || null,
+            companyId: company.id,
+            companyName: data.companyName || company.name,
+            companyLogo: data.companyLogo || company.logo || null,
+            companyDescription: data.companyDescription || company.description || null,
         },
     });
 
@@ -345,9 +376,17 @@ const updateJob = asyncHandler(async (req, res) => {
     if (!job) throw ApiError.notFound('Job not found');
     if (job.postedById !== req.user.id) throw ApiError.forbidden('Not your job');
 
+    const updateData = { ...req.body };
+    if (Object.prototype.hasOwnProperty.call(updateData, 'skills')) {
+        updateData.skills = await normalizeSkillList(updateData.skills, {
+            createMissing: true,
+            incrementUsage: true,
+        });
+    }
+
     const updated = await prisma.job.update({
         where: { id: req.params.id },
-        data: req.body,
+        data: updateData,
     });
 
     // Invalidate cache

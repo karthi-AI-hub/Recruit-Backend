@@ -3,3 +3,13 @@ uploads/
 prisma/migrations/
 *.log
 dist/
+
+# Environment & secrets
+.env
+.env.local
+.env.production
+*.pem
+*.key
+*.jks
+*.keystore
+src/config/firebaseServiceAccountKey.json

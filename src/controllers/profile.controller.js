@@ -2,6 +2,8 @@ const { prisma } = require('../config/database');
 const asyncHandler = require('../utils/asyncHandler');
 const ApiError = require('../utils/ApiError');
 const { invalidateCache } = require('../middleware/cache.middleware');
+const { canViewDirectContact } = require('../utils/subscriptionAccess');
+const { normalizeSkillList } = require('../utils/skillNormalization');
 
 /**
  * GET /api/profile — Get current user profile
@@ -38,6 +40,11 @@ const getProfile = asyncHandler(async (req, res) => {
             isAvailable: true,
             noticePeriod: true,
             currentCtc: true,
+            summary: true,
+            about: true,
+            github: true,
+            linkedIn: true,
+            portfolio: true,
             isProfileHidden: true,
             company: true,
             createdAt: true,
@@ -71,6 +78,13 @@ const updateProfile = asyncHandler(async (req, res) => {
     const userId = req.user.id;
     const { education, workExperience, company, ...userData } = req.body;
 
+    if (Object.prototype.hasOwnProperty.call(userData, 'skills')) {
+        userData.skills = await normalizeSkillList(userData.skills, {
+            createMissing: true,
+            incrementUsage: true,
+        });
+    }
+
     // Build array of prisma promises for transaction
     const transactions = [];
 
@@ -97,6 +111,11 @@ const updateProfile = asyncHandler(async (req, res) => {
                 isAvailable: true,
                 noticePeriod: true,
                 currentCtc: true,
+                summary: true,
+                about: true,
+                github: true,
+                linkedIn: true,
+                portfolio: true,
                 isProfileHidden: true,
             },
         })
@@ -203,6 +222,11 @@ const updateProfile = asyncHandler(async (req, res) => {
             isAvailable: true,
             noticePeriod: true,
             currentCtc: true,
+            summary: true,
+            about: true,
+            github: true,
+            linkedIn: true,
+            portfolio: true,
             isProfileHidden: true,
             education: true,
             workExperience: true,
@@ -303,6 +327,10 @@ const uploadProfileImage = asyncHandler(async (req, res) => {
 
 /**
  * GET /api/profile/:userId — Get a user's public profile
+ *
+ * Respects isProfileHidden (unless viewer is the user themselves).
+ * Contact fields (email, phone) are masked unless the requesting
+ * recruiter has a Premium/Custom plan.
  */
 const getPublicProfile = asyncHandler(async (req, res) => {
     const user = await prisma.user.findUnique({
@@ -310,6 +338,8 @@ const getPublicProfile = asyncHandler(async (req, res) => {
         select: {
             id: true,
             name: true,
+            email: true,
+            phone: true,
             role: true,
             profileImage: true,
             headline: true,
@@ -319,8 +349,11 @@ const getPublicProfile = asyncHandler(async (req, res) => {
             currentCompany: true,
             currentDesignation: true,
             isAvailable: true,
+            noticePeriod: true,
+            currentCtc: true,
             summary: true,
             about: true,
+            isProfileHidden: true,
             workExperience: true,
             education: true,
             certifications: true,
@@ -338,7 +371,48 @@ const getPublicProfile = asyncHandler(async (req, res) => {
 
     if (!user) throw ApiError.notFound('User not found');
 
-    res.json({ success: true, data: user });
+    // Respect profile hidden flag (owner can always see their own)
+    const isOwner = req.user.id === user.id;
+    if (user.isProfileHidden && !isOwner) {
+        throw ApiError.notFound('This profile is not available');
+    }
+
+    // Determine contact access for recruiter viewers
+    let allowDirectContact = isOwner; // owners always see their own info
+    if (!isOwner && req.user.role === 'recruiter') {
+        const recruiter = await prisma.user.findUnique({
+            where: { id: req.user.id },
+            select: {
+                company: {
+                    select: {
+                        subscriptionPlan: true,
+                        subscriptionStatus: true,
+                        trialEndsAt: true,
+                    },
+                },
+            },
+        });
+        allowDirectContact = recruiter?.company
+            ? canViewDirectContact(recruiter.company)
+            : false;
+    }
+
+    // Strip internal fields before responding
+    const { isProfileHidden, ...profileData } = user;
+
+    // Mask contact info if not allowed
+    if (!allowDirectContact) {
+        profileData.email = null;
+        profileData.phone = null;
+    }
+
+    res.json({
+        success: true,
+        data: profileData,
+        access: {
+            canViewDirectContact: allowDirectContact,
+        },
+    });
 });
 
 
@@ -352,6 +426,26 @@ const updateEducation = asyncHandler(async (req, res) => {
         throw ApiError.badRequest('Education must be an array');
     }
 
+    const toYearDate = (value) => {
+        if (value === null || value === undefined || value === '') return null;
+        if (value instanceof Date) return value;
+        if (typeof value === 'number') {
+            if (value >= 1000 && value <= 9999) {
+                return new Date(`${value}-01-01`);
+            }
+            return new Date(value);
+        }
+        if (typeof value === 'string') {
+            const trimmed = value.trim();
+            if (/^\d{4}$/.test(trimmed)) {
+                return new Date(`${trimmed}-01-01`);
+            }
+            const parsed = new Date(trimmed);
+            return Number.isNaN(parsed.getTime()) ? null : parsed;
+        }
+        return null;
+    };
+
     // Transaction to replace education (delete all for user, then create new)
     await prisma.$transaction([
         prisma.education.deleteMany({ where: { userId: req.user.id } }),
@@ -361,8 +455,8 @@ const updateEducation = asyncHandler(async (req, res) => {
                 degree: edu.degree,
                 institution: edu.institution,
                 field: edu.field,
-                startYear: new Date(edu.startYear),
-                endYear: new Date(edu.endYear),
+                startYear: toYearDate(edu.startYear),
+                endYear: toYearDate(edu.endYear) || toYearDate(edu.startYear),
                 grade: edu.grade,
                 location: edu.location,
             })),

@@ -1,9 +1,12 @@
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const { prisma } = require('../config/database');
 const config = require('../config/env');
 const asyncHandler = require('../utils/asyncHandler');
 const ApiError = require('../utils/ApiError');
+const { sendPasswordResetEmail } = require('../utils/emailService');
+const logger = require('../config/logger');
 
 /**
  * Generate access + refresh tokens for a user.
@@ -41,6 +44,9 @@ const register = asyncHandler(async (req, res) => {
     // Hash password
     const passwordHash = await bcrypt.hash(password, 12);
 
+    // Generate email verification token (6-digit OTP)
+    const verifyOtp = crypto.randomInt(100000, 999999).toString();
+
     // Create user
     const user = await prisma.user.create({
         data: {
@@ -49,6 +55,7 @@ const register = asyncHandler(async (req, res) => {
             passwordHash,
             phone,
             role,
+            emailVerifyToken: verifyOtp,
         },
         select: {
             id: true,
@@ -58,6 +65,9 @@ const register = asyncHandler(async (req, res) => {
             phone: true,
             createdAt: true,
         },
+    });
+    sendPasswordResetEmail(email, verifyOtp).catch((err) => {
+        logger.error(`Failed to send verification email to ${email}: ${err.message}`);
     });
 
     // Generate tokens
@@ -71,7 +81,7 @@ const register = asyncHandler(async (req, res) => {
 
     res.status(201).json({
         success: true,
-        message: 'Registration successful',
+        message: 'Registration successful. Please verify your email.',
         data: {
             user,
             ...tokens,
@@ -98,6 +108,11 @@ const login = asyncHandler(async (req, res) => {
                     id: true,
                     name: true,
                     logo: true,
+                    industry: true,
+                    location: true,
+                    description: true,
+                    website: true,
+                    employeeCount: true,
                     subscriptionPlan: true,
                     subscriptionStatus: true,
                     trialEndsAt: true,
@@ -225,6 +240,9 @@ const getMe = asyncHandler(async (req, res) => {
                     logo: true,
                     industry: true,
                     location: true,
+                    description: true,
+                    website: true,
+                    employeeCount: true,
                     subscriptionPlan: true,
                     subscriptionStatus: true,
                     trialEndsAt: true,
@@ -327,15 +345,167 @@ const forgotPassword = asyncHandler(async (req, res) => {
 
     const user = await prisma.user.findUnique({ where: { email } });
 
-    // In a real app, send email with reset token.
-    // For MVP, we'll just simulate success or maybe log it.
-    console.log(`Password reset requested for: ${email}`);
-
     // Always return success to prevent email enumeration
+    if (!user) {
+        res.json({
+            success: true,
+            message: 'If an account exists with this email, a reset code has been sent.',
+        });
+        return;
+    }
+
+    // Invalidate any previous unused tokens for this email
+    await prisma.passwordReset.updateMany({
+        where: { email, used: false },
+        data: { used: true },
+    });
+
+    // Generate 6-digit OTP
+    const otp = crypto.randomInt(100000, 999999).toString();
+    const tokenHash = await bcrypt.hash(otp, 10);
+
+    // Store with 10-minute expiry
+    await prisma.passwordReset.create({
+        data: {
+            email,
+            tokenHash,
+            expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+        },
+    });
+
+    // Send email (logs OTP in dev when SMTP is not configured)
+    await sendPasswordResetEmail(email, otp);
+
     res.json({
         success: true,
-        message: 'If an account exists with this email, a reset link has been sent.',
+        message: 'If an account exists with this email, a reset code has been sent.',
     });
 });
 
-module.exports = { register, login, refreshToken: refreshTokenHandler, getMe, logout, changePassword, deleteAccount, forgotPassword };
+/**
+ * POST /api/auth/reset-password
+ */
+const resetPassword = asyncHandler(async (req, res) => {
+    const { email, otp, newPassword } = req.body;
+
+    if (!email || !otp || !newPassword) {
+        throw ApiError.badRequest('Email, OTP and new password are required');
+    }
+
+    if (newPassword.length < 6) {
+        throw ApiError.badRequest('Password must be at least 6 characters');
+    }
+
+    // Find the most recent unused, non-expired token for this email
+    const resetRecord = await prisma.passwordReset.findFirst({
+        where: {
+            email,
+            used: false,
+            expiresAt: { gt: new Date() },
+        },
+        orderBy: { createdAt: 'desc' },
+    });
+
+    if (!resetRecord) {
+        throw ApiError.badRequest('Invalid or expired reset code');
+    }
+
+    // Verify OTP
+    const isValid = await bcrypt.compare(otp, resetRecord.tokenHash);
+    if (!isValid) {
+        throw ApiError.badRequest('Invalid or expired reset code');
+    }
+
+    // Mark token as used
+    await prisma.passwordReset.update({
+        where: { id: resetRecord.id },
+        data: { used: true },
+    });
+
+    // Update the user's password
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) {
+        throw ApiError.badRequest('Invalid or expired reset code');
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, 12);
+    await prisma.user.update({
+        where: { id: user.id },
+        data: { passwordHash, refreshToken: null },
+    });
+
+    logger.info(`Password reset completed for ${email}`);
+
+    res.json({
+        success: true,
+        message: 'Password has been reset successfully. Please sign in with your new password.',
+    });
+});
+
+/**
+ * POST /api/auth/verify-email
+ */
+const verifyEmail = asyncHandler(async (req, res) => {
+    const { email, otp } = req.body;
+
+    if (!email || !otp) {
+        throw ApiError.badRequest('Email and OTP are required');
+    }
+
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) {
+        throw ApiError.badRequest('Invalid verification code');
+    }
+
+    if (user.emailVerified) {
+        return res.json({ success: true, message: 'Email already verified' });
+    }
+
+    if (user.emailVerifyToken !== otp) {
+        throw ApiError.badRequest('Invalid verification code');
+    }
+
+    await prisma.user.update({
+        where: { id: user.id },
+        data: { emailVerified: true, emailVerifyToken: null },
+    });
+
+    logger.info(`Email verified for ${email}`);
+
+    res.json({
+        success: true,
+        message: 'Email verified successfully',
+    });
+});
+
+/**
+ * POST /api/auth/resend-verification
+ */
+const resendVerification = asyncHandler(async (req, res) => {
+    const { email } = req.body;
+
+    if (!email) {
+        throw ApiError.badRequest('Email is required');
+    }
+
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user || user.emailVerified) {
+        // Return success to prevent email enumeration
+        return res.json({ success: true, message: 'If the email exists and is unverified, a new code has been sent.' });
+    }
+
+    const verifyOtp = crypto.randomInt(100000, 999999).toString();
+    await prisma.user.update({
+        where: { id: user.id },
+        data: { emailVerifyToken: verifyOtp },
+    });
+
+    await sendPasswordResetEmail(email, verifyOtp);
+
+    res.json({
+        success: true,
+        message: 'If the email exists and is unverified, a new code has been sent.',
+    });
+});
+
+module.exports = { register, login, refreshToken: refreshTokenHandler, getMe, logout, changePassword, deleteAccount, forgotPassword, resetPassword, verifyEmail, resendVerification };

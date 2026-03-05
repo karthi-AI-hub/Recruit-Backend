@@ -1,6 +1,7 @@
 const { prisma } = require('../config/database');
 const asyncHandler = require('../utils/asyncHandler');
 const ApiError = require('../utils/ApiError');
+const { normalizeSkillName, toCanonicalDisplayName } = require('../utils/skillNormalization');
 
 /**
  * GET /api/skills?q=flutter
@@ -67,7 +68,7 @@ const addSkill = asyncHandler(async (req, res) => {
         throw ApiError.badRequest('Skill name is required');
     }
 
-    const trimmedName = name.trim();
+    const trimmedName = normalizeSkillName(name);
 
     // Check if skill already exists (case-insensitive)
     const existing = await prisma.skill.findFirst({
@@ -90,7 +91,7 @@ const addSkill = asyncHandler(async (req, res) => {
     // Create new skill
     const skill = await prisma.skill.create({
         data: {
-            name: trimmedName,
+            name: toCanonicalDisplayName(trimmedName),
             category: category || null,
         },
     });

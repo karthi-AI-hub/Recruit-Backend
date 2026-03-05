@@ -80,9 +80,50 @@ const deleteNotification = asyncHandler(async (req, res) => {
     res.json({ success: true, message: 'Notification deleted' });
 });
 
+/**
+ * POST /api/notifications/device — Register an FCM device token
+ */
+const registerDevice = asyncHandler(async (req, res) => {
+    const { token, platform } = req.body;
+
+    if (!token || !platform) {
+        throw ApiError.badRequest('token and platform are required');
+    }
+
+    if (!['android', 'ios', 'web'].includes(platform)) {
+        throw ApiError.badRequest('platform must be android, ios, or web');
+    }
+
+    // Upsert: if token already exists for this user, refresh updatedAt.
+    // If token belongs to another user (re-install), reassign it.
+    await prisma.deviceToken.upsert({
+        where: { token },
+        update: { userId: req.user.id, platform },
+        create: { userId: req.user.id, token, platform },
+    });
+
+    res.json({ success: true, message: 'Device registered' });
+});
+
+/**
+ * DELETE /api/notifications/device — Remove an FCM device token (logout)
+ */
+const removeDevice = asyncHandler(async (req, res) => {
+    const { token } = req.body;
+    if (!token) throw ApiError.badRequest('token is required');
+
+    await prisma.deviceToken.deleteMany({
+        where: { token, userId: req.user.id },
+    });
+
+    res.json({ success: true, message: 'Device removed' });
+});
+
 module.exports = {
     getNotifications,
     markAsRead,
     markAllAsRead,
     deleteNotification,
+    registerDevice,
+    removeDevice,
 };

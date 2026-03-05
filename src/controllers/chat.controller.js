@@ -1,6 +1,17 @@
 const { prisma } = require('../config/database');
 const asyncHandler = require('../utils/asyncHandler');
 const ApiError = require('../utils/ApiError');
+const { paginate, paginationMeta } = require('../utils/pagination');
+const { createNotification } = require('../utils/notificationHelper');
+
+const resolveUserName = async (userId, fallbackName) => {
+    if (fallbackName && fallbackName.trim()) return fallbackName;
+    const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { name: true },
+    });
+    return user?.name || 'User';
+};
 
 /**
  * POST /api/chat/start
@@ -42,6 +53,7 @@ const startConversation = asyncHandler(async (req, res) => {
     // Let's assume strict matching.
 
     if (!conversation) {
+        const senderName = await resolveUserName(recruiterId, req.user.name);
         // Create new conversation
         // Get job details if provided to populate snapshot fields
         let jobTitle = null;
@@ -69,60 +81,110 @@ const startConversation = asyncHandler(async (req, res) => {
             data: {
                 conversationId: conversation.id,
                 senderId: recruiterId,
-                senderName: req.user.name,
+                senderName,
                 text: initialMessage,
                 sentAt: new Date(),
             }
         });
+
+        // Notify the candidate about the new conversation
+        const senderLabel = await resolveUserName(recruiterId, req.user.name);
+        await createNotification({
+            userId: candidateId,
+            title: 'New Message',
+            message: `${senderLabel} started a conversation${jobTitle ? ` about ${jobTitle}` : ''}`,
+            type: 'message',
+            metadata: { conversationId: conversation.id, jobId },
+        });
     }
+
+    // Re-fetch with includes to return formatted data for the frontend
+    const fullConversation = await prisma.conversation.findUnique({
+        where: { id: conversation.id },
+        include: {
+            recruiter: {
+                select: { id: true, name: true, profileImage: true, company: { select: { name: true, logo: true } } }
+            },
+            candidate: {
+                select: { id: true, name: true, profileImage: true }
+            },
+            job: {
+                select: { id: true, title: true, companyName: true, companyLogo: true }
+            }
+        }
+    });
+
+    const formatted = {
+        id: fullConversation.id,
+        recruiterId: fullConversation.recruiterId,
+        recruiterName: fullConversation.recruiter?.name,
+        recruiterAvatar: fullConversation.recruiter?.profileImage,
+        candidateId: fullConversation.candidateId,
+        candidateName: fullConversation.candidate?.name,
+        candidateAvatar: fullConversation.candidate?.profileImage,
+        jobId: fullConversation.jobId,
+        jobTitle: fullConversation.jobTitle || fullConversation.job?.title,
+        companyName: fullConversation.job?.companyName || fullConversation.recruiter?.company?.name,
+        companyLogo: fullConversation.job?.companyLogo || fullConversation.recruiter?.company?.logo,
+        lastMessage: fullConversation.lastMessage,
+        lastMessageAt: fullConversation.lastMessageAt,
+        unreadCount: 0,
+        isActive: fullConversation.isActive,
+    };
 
     res.status(201).json({
         success: true,
-        data: conversation
+        data: formatted
     });
 });
 
 /**
  * GET /api/chat/conversations
- * Get all conversations for the current user
+ * Get all conversations for the current user (paginated)
  */
 const getConversations = asyncHandler(async (req, res) => {
     const userId = req.user.id;
     const isRecruiter = req.user.role === 'recruiter';
+    const { skip, take, page, limit } = paginate(req.query);
 
     const where = isRecruiter ? { recruiterId: userId } : { candidateId: userId };
 
-    const conversations = await prisma.conversation.findMany({
-        where,
-        orderBy: { lastMessageAt: 'desc' },
-        include: {
-            recruiter: {
-                select: {
-                    id: true,
-                    name: true,
-                    profileImage: true,
-                    company: {
-                        select: { name: true, logo: true }
+    const [conversations, total] = await Promise.all([
+        prisma.conversation.findMany({
+            where,
+            orderBy: { lastMessageAt: 'desc' },
+            skip,
+            take,
+            include: {
+                recruiter: {
+                    select: {
+                        id: true,
+                        name: true,
+                        profileImage: true,
+                        company: {
+                            select: { name: true, logo: true }
+                        }
+                    }
+                },
+                candidate: {
+                    select: {
+                        id: true,
+                        name: true,
+                        profileImage: true,
+                    }
+                },
+                job: {
+                    select: {
+                        id: true,
+                        title: true,
+                        companyName: true,
+                        companyLogo: true
                     }
                 }
-            },
-            candidate: {
-                select: {
-                    id: true,
-                    name: true,
-                    profileImage: true,
-                }
-            },
-            job: {
-                select: {
-                    id: true,
-                    title: true,
-                    companyName: true,
-                    companyLogo: true
-                }
             }
-        }
-    });
+        }),
+        prisma.conversation.count({ where }),
+    ]);
 
     // Format for frontend
     const formatted = conversations.map(c => {
@@ -149,8 +211,8 @@ const getConversations = asyncHandler(async (req, res) => {
             lastMessage: c.lastMessage,
             lastMessageAt: c.lastMessageAt,
             lastMessageBy: c.lastMessageBy,
-            unreadRecruiter: c.unreadRecruiter,
-            unreadCandidate: c.unreadCandidate,
+            // Role-aware unread count for the requesting user
+            unreadCount: isRecruiter ? c.unreadRecruiter : c.unreadCandidate,
             isActive: c.isActive,
             // Extra fields for UI
             companyName,
@@ -160,13 +222,14 @@ const getConversations = asyncHandler(async (req, res) => {
 
     res.json({
         success: true,
-        data: formatted
+        data: formatted,
+        pagination: paginationMeta(total, page, limit),
     });
 });
 
 /**
  * GET /api/chat/:conversationId/messages
- * Get messages for a conversation
+ * Get messages for a conversation (paginated, newest first)
  */
 const getMessages = asyncHandler(async (req, res) => {
     const { conversationId } = req.params;
@@ -182,14 +245,22 @@ const getMessages = asyncHandler(async (req, res) => {
         throw ApiError.forbidden('Access denied');
     }
 
-    const messages = await prisma.chatMessage.findMany({
-        where: { conversationId },
-        orderBy: { sentAt: 'asc' }, // Chronological order
-    });
+    const { skip, take, page, limit } = paginate(req.query);
+
+    const [messages, total] = await Promise.all([
+        prisma.chatMessage.findMany({
+            where: { conversationId },
+            orderBy: { sentAt: 'desc' }, // newest first for pagination
+            skip,
+            take,
+        }),
+        prisma.chatMessage.count({ where: { conversationId } }),
+    ]);
 
     res.json({
         success: true,
-        data: messages
+        data: messages.reverse(), // return in chronological order
+        pagination: paginationMeta(total, page, limit),
     });
 });
 
@@ -201,7 +272,7 @@ const sendMessage = asyncHandler(async (req, res) => {
     const { conversationId } = req.params;
     const { text } = req.body;
     const userId = req.user.id;
-    const userName = req.user.name;
+    const userName = await resolveUserName(userId, req.user.name);
 
     if (!text) throw ApiError.badRequest('Message text is required');
 

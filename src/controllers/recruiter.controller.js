@@ -1,6 +1,9 @@
 const { prisma } = require('../config/database');
 const asyncHandler = require('../utils/asyncHandler');
 const ApiError = require('../utils/ApiError');
+const { isCompanyProfileComplete } = require('../utils/companyProfile');
+const { hasActiveSubscription, canAccessAnalytics, canViewDirectContact } = require('../utils/subscriptionAccess');
+const { expandSkillQueryToCanonicalSkills, normalizeSkillList } = require('../utils/skillNormalization');
 
 /**
  * GET /api/recruiter/dashboard — Dashboard metrics
@@ -109,6 +112,27 @@ const getAnalytics = asyncHandler(async (req, res) => {
     const userId = req.user.id;
     const { period } = req.query;
 
+    const recruiter = await prisma.user.findUnique({
+        where: { id: userId },
+        include: { company: true },
+    });
+
+    if (!recruiter.companyId || !recruiter.company) {
+        throw ApiError.forbidden('You must create a company profile before accessing analytics');
+    }
+
+    if (!isCompanyProfileComplete(recruiter.company)) {
+        throw ApiError.forbidden('Complete your company profile before accessing analytics');
+    }
+
+    if (!hasActiveSubscription(recruiter.company)) {
+        throw ApiError.forbidden('An active subscription is required to access analytics');
+    }
+
+    if (!canAccessAnalytics(recruiter.company)) {
+        throw ApiError.forbidden('Analytics is available on Premium and Custom plans only');
+    }
+
     // Default to 30 days if not specified or invalid
     let days = 30;
     if (period === '7d' || period === 'This Week') days = 7;
@@ -181,6 +205,39 @@ const getAnalytics = asyncHandler(async (req, res) => {
 });
 
 /**
+ * GET /api/recruiter/company — Recruiter's own company profile
+ */
+const getOwnCompanyProfile = asyncHandler(async (req, res) => {
+    const user = await prisma.user.findUnique({
+        where: { id: req.user.id },
+        include: { company: true },
+    });
+
+    if (!user || user.role !== 'recruiter') {
+        throw ApiError.forbidden('Only recruiters can access company profile');
+    }
+
+    if (!user.companyId || !user.company) {
+        return res.json({
+            success: true,
+            data: {
+                hasCompany: false,
+                isProfileComplete: false,
+            },
+        });
+    }
+
+    res.json({
+        success: true,
+        data: {
+            hasCompany: true,
+            isProfileComplete: isCompanyProfileComplete(user.company),
+            company: user.company,
+        },
+    });
+});
+
+/**
  * GET /api/recruiter/candidates — Search candidates
  */
 const searchCandidates = asyncHandler(async (req, res) => {
@@ -196,27 +253,45 @@ const searchCandidates = asyncHandler(async (req, res) => {
         throw ApiError.forbidden('You must create a company profile before searching candidates');
     }
 
-    const { subscriptionStatus, trialEndsAt } = recruiter.company;
-    const isActive = subscriptionStatus === 'active' || subscriptionStatus === 'trialing';
-    const isExpired = trialEndsAt && new Date(trialEndsAt) < new Date();
+    if (!isCompanyProfileComplete(recruiter.company)) {
+        throw ApiError.forbidden('Complete your company profile before searching candidates');
+    }
 
-    if (!isActive || isExpired) {
+    if (!hasActiveSubscription(recruiter.company)) {
         throw ApiError.forbidden('An active subscription is required to search candidates. Please subscribe first.');
     }
 
+    const allowDirectContact = canViewDirectContact(recruiter.company);
+
     const where = { role: 'job_seeker', isProfileHidden: false };
+    const matchedSearchSkills = search
+        ? await expandSkillQueryToCanonicalSkills(search, { limitPerToken: 10 })
+        : [];
 
     if (search) {
         where.OR = [
             { name: { contains: search, mode: 'insensitive' } },
             { headline: { contains: search, mode: 'insensitive' } },
             { currentDesignation: { contains: search, mode: 'insensitive' } },
+            ...(matchedSearchSkills.length > 0
+                ? [{ skills: { hasSome: matchedSearchSkills } }]
+                : []),
         ];
     }
 
     if (skills) {
-        const skillList = skills.split(',').map((s) => s.trim());
-        where.skills = { hasSome: skillList };
+        let skillList = await expandSkillQueryToCanonicalSkills(skills, {
+            limitPerToken: 12,
+        });
+        if (skillList.length === 0) {
+            skillList = await normalizeSkillList(skills, {
+                createMissing: false,
+                incrementUsage: false,
+            });
+        }
+        if (skillList.length > 0) {
+            where.skills = { hasSome: skillList };
+        }
     }
 
     if (location) where.location = { contains: location, mode: 'insensitive' };
@@ -251,9 +326,20 @@ const searchCandidates = asyncHandler(async (req, res) => {
         prisma.user.count({ where }),
     ]);
 
+    const maskedCandidates = allowDirectContact
+        ? candidates
+        : candidates.map((candidate) => ({
+            ...candidate,
+            email: null,
+        }));
+
     res.json({
         success: true,
-        data: candidates,
+        data: maskedCandidates,
+        access: {
+            canViewDirectContact: allowDirectContact,
+            plan: recruiter.company.subscriptionPlan,
+        },
         pagination: {
             total,
             page: pageNum,
@@ -513,4 +599,87 @@ const getTeamInvites = asyncHandler(async (req, res) => {
     });
 });
 
-module.exports = { getDashboard, getAnalytics, searchCandidates, updateCompanyProfile, getCompanyProfile, uploadCompanyLogo, getTeamMembers, inviteTeamMember, getTeamInvites };
+/**
+ * POST /api/recruiter/team/invite/accept — Accept a team invitation
+ */
+const acceptTeamInvite = asyncHandler(async (req, res) => {
+    const { inviteId } = req.body;
+    const userId = req.user.id;
+
+    if (!inviteId) {
+        throw ApiError.badRequest('Invite ID is required');
+    }
+
+    const invite = await prisma.teamInvite.findUnique({
+        where: { id: inviteId },
+    });
+
+    if (!invite || invite.status !== 'pending') {
+        throw ApiError.notFound('Invitation not found or already processed');
+    }
+
+    // Check the logged-in user's email matches the invite
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (user.email !== invite.email) {
+        throw ApiError.forbidden('This invitation is not for your email');
+    }
+
+    // Update user's companyId and mark invite as accepted
+    await prisma.$transaction([
+        prisma.user.update({
+            where: { id: userId },
+            data: { companyId: invite.companyId },
+        }),
+        prisma.teamInvite.update({
+            where: { id: inviteId },
+            data: { status: 'accepted' },
+        }),
+    ]);
+
+    res.json({
+        success: true,
+        message: 'Invitation accepted. You are now part of the team.',
+    });
+});
+
+/**
+ * DELETE /api/recruiter/team/:memberId — Remove a team member
+ */
+const removeTeamMember = asyncHandler(async (req, res) => {
+    const { memberId } = req.params;
+    const userId = req.user.id;
+
+    const currentUser = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { companyId: true },
+    });
+
+    if (!currentUser.companyId) {
+        throw ApiError.badRequest('No company found.');
+    }
+
+    const member = await prisma.user.findUnique({
+        where: { id: memberId },
+        select: { companyId: true },
+    });
+
+    if (!member || member.companyId !== currentUser.companyId) {
+        throw ApiError.notFound('Member not found in your team');
+    }
+
+    if (memberId === userId) {
+        throw ApiError.badRequest('You cannot remove yourself from the team');
+    }
+
+    await prisma.user.update({
+        where: { id: memberId },
+        data: { companyId: null },
+    });
+
+    res.json({
+        success: true,
+        message: 'Team member removed',
+    });
+});
+
+module.exports = { getDashboard, getAnalytics, getOwnCompanyProfile, searchCandidates, updateCompanyProfile, getCompanyProfile, uploadCompanyLogo, getTeamMembers, inviteTeamMember, getTeamInvites, acceptTeamInvite, removeTeamMember };

@@ -83,6 +83,10 @@ model User {
   // Refresh token for JWT
   refreshToken    String?   @map("refresh_token")
 
+  // Email verification
+  emailVerified   Boolean   @default(false) @map("email_verified")
+  emailVerifyToken String?  @map("email_verify_token")
+
   // Timestamps
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")
@@ -119,6 +123,7 @@ model User {
   // Feedback & Invites
   feedbacks       Feedback[]
   sentInvites     TeamInvite[]  @relation("InviteSender")
+  deviceTokens    DeviceToken[]
 
   @@map("users")
   @@index([email])
@@ -165,6 +170,7 @@ model Job {
   maxExperience   Int       @default(0) @map("max_experience")
   skills          String[]  @default([])
   requirements    String[]  @default([])
+  benefits        String[]  @default([])
   jobType         JobType   @default(full_time) @map("job_type")
   employmentType  String?   @map("employment_type")
   isRemote        Boolean   @default(false) @map("is_remote")
@@ -214,6 +220,7 @@ model Application {
   user            User              @relation("Applicant", fields: [userId], references: [id], onDelete: Cascade)
   applicantName   String?           @map("applicant_name")
   status          ApplicationStatus @default(applied)
+  resumeUrl       String?           @map("resume_url")
   coverLetter     String?           @map("cover_letter")
   recruiterMessage String?          @map("recruiter_message")
   appliedDate     DateTime          @default(now()) @map("applied_date")
@@ -399,4 +406,30 @@ model TeamInvite {
 
   @@unique([companyId, email])
   @@map("team_invites")
+}
+
+model DeviceToken {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String   @unique
+  platform  String   // "android", "ios", "web"
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@map("device_tokens")
+}
+
+model PasswordReset {
+  id        String   @id @default(uuid())
+  email     String
+  tokenHash String   @map("token_hash")
+  expiresAt DateTime @map("expires_at")
+  used      Boolean  @default(false)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([email])
+  @@index([expiresAt])
+  @@map("password_resets")
 }

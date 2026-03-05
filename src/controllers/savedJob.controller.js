@@ -2,6 +2,7 @@ const { prisma } = require('../config/database');
 const asyncHandler = require('../utils/asyncHandler');
 const ApiError = require('../utils/ApiError');
 const { invalidateCache } = require('../middleware/cache.middleware');
+const { paginate, paginationMeta } = require('../utils/pagination');
 
 /**
  * POST /api/saved-jobs/:jobId — Toggle save/unsave job
@@ -41,34 +42,31 @@ const toggleSavedJob = asyncHandler(async (req, res) => {
 });
 
 /**
- * GET /api/saved-jobs — List saved jobs
+ * GET /api/saved-jobs — List saved jobs (paginated)
  */
 const getSavedJobs = asyncHandler(async (req, res) => {
     const userId = req.user.id;
-    const cacheKey = `saved:${userId}`;
+    const { skip, take, page, limit } = paginate(req.query);
 
-    // Try cache
-    if (require('../config/redis').redis) {
-        try {
-            const cached = await require('../config/redis').redis.get(cacheKey);
-            if (cached) return res.json(JSON.parse(cached));
-        } catch { }
-    }
-
-    const savedJobs = await prisma.savedJob.findMany({
-        where: { userId },
-        orderBy: { savedAt: 'desc' },
-        include: {
-            job: {
-                include: {
-                    company: true,
-                    postedBy: {
-                        select: { id: true, name: true, profileImage: true },
+    const [savedJobs, total] = await Promise.all([
+        prisma.savedJob.findMany({
+            where: { userId },
+            orderBy: { savedAt: 'desc' },
+            skip,
+            take,
+            include: {
+                job: {
+                    include: {
+                        company: true,
+                        postedBy: {
+                            select: { id: true, name: true, profileImage: true },
+                        },
                     },
                 },
             },
-        },
-    });
+        }),
+        prisma.savedJob.count({ where: { userId } }),
+    ]);
 
     // Check application status for these jobs
     const applications = await prisma.application.findMany({
@@ -83,14 +81,7 @@ const getSavedJobs = asyncHandler(async (req, res) => {
         hasApplied: appliedJobIds.has(s.jobId),
     }));
 
-    const response = { success: true, data };
-
-    // Set cache
-    if (require('../config/redis').redis) {
-        try {
-            await require('../config/redis').redis.setex(cacheKey, 300, JSON.stringify(response));
-        } catch { }
-    }
+    const response = { success: true, data, pagination: paginationMeta(total, page, limit) };
 
     res.json(response);
 });

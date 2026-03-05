@@ -7,20 +7,14 @@
     "dev": "nodemon src/index.js",
     "start": "node src/index.js",
     "db:migrate": "npx prisma migrate dev",
-    "db:seed": "npx prisma db seed",
     "db:studio": "npx prisma studio",
     "db:reset": "npx prisma migrate reset --force",
     "db:generate": "npx prisma generate",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "db:normalize-skills": "node prisma/normalize-skills.js",
+    "migrate:deploy": "npx prisma migrate deploy",
+    "migrate:status": "npx prisma migrate status",
+    "start:prod": "node src/index.js"
   },
-  "prisma": {
-    "seed": "node prisma/seed.js"
-  },
-  "keywords": [
-    "recruit",
-    "job-portal",
-    "api"
-  ],
   "author": "",
   "license": "ISC",
   "dependencies": {
@@ -32,13 +26,16 @@
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "express-rate-limit": "^8.2.1",
+    "firebase-admin": "^13.7.0",
     "helmet": "^8.1.0",
     "ioredis": "^5.9.3",
     "joi": "^18.0.2",
     "jsonwebtoken": "^9.0.3",
     "morgan": "^1.10.1",
     "multer": "^2.0.2",
-    "socket.io": "^4.8.3"
+    "nodemailer": "^8.0.1",
+    "socket.io": "^4.8.3",
+    "winston": "^3.19.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.11",

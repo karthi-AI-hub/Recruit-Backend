@@ -1,6 +1,9 @@
 const jwt = require('jsonwebtoken');
 const config = require('../config/env');
+const logger = require('../config/logger');
 const { prisma } = require('../config/database');
+const { sendPushToUser } = require('../utils/pushNotification');
+const { createNotification } = require('../utils/notificationHelper');
 
 /**
  * Initialize Socket.io chat handlers.
@@ -25,10 +28,38 @@ const initChatSocket = (io) => {
 
     io.on('connection', (socket) => {
         const userId = socket.user.id;
-        console.log(`🔌 User connected: ${userId}`);
+        logger.info(`🔌 User connected: ${userId}`);
 
         // Join user's personal room for notifications
         socket.join(`user:${userId}`);
+
+        /**
+         * Acknowledge receipt of a message (client → server).
+         * Lightweight: marks a single message as 'delivered'.
+         */
+        socket.on('ack_message', async ({ messageId, conversationId }) => {
+            try {
+                if (!messageId || !conversationId) return;
+                const msg = await prisma.chatMessage.findUnique({
+                    where: { id: messageId },
+                    select: { status: true, senderId: true },
+                });
+                // Only upgrade sent → delivered (ignore if already delivered/read)
+                if (!msg || msg.status !== 'sent' || msg.senderId === userId) return;
+
+                await prisma.chatMessage.update({
+                    where: { id: messageId },
+                    data: { status: 'delivered' },
+                });
+                io.to(`conv:${conversationId}`).emit('message_status_updated', {
+                    messageId,
+                    conversationId,
+                    status: 'delivered',
+                });
+            } catch (err) {
+                logger.error('ack_message error:', err.message);
+            }
+        });
 
         /**
          * Join a conversation room
@@ -48,6 +79,23 @@ const initChatSocket = (io) => {
 
                 socket.join(`conv:${conversationId}`);
                 socket.emit('joined_conversation', conversationId);
+
+                // Auto-deliver any undelivered messages from the other party
+                const delivered = await prisma.chatMessage.updateMany({
+                    where: {
+                        conversationId,
+                        senderId: { not: userId },
+                        status: 'sent',
+                    },
+                    data: { status: 'delivered' },
+                });
+
+                if (delivered.count > 0) {
+                    io.to(`conv:${conversationId}`).emit('messages_delivered', {
+                        conversationId,
+                        deliveredTo: userId,
+                    });
+                }
             } catch (err) {
                 socket.emit('error', err.message);
             }
@@ -105,13 +153,27 @@ const initChatSocket = (io) => {
                 // Broadcast to conversation room
                 io.to(`conv:${conversationId}`).emit('new_message', message);
 
-                // Notify the other user
+                // Delivery is handled by the receiver's ack_message event.
+                // Notify the other user via their personal room.
                 const otherUserId = isRecruiter ? conversation.candidateId : conversation.recruiterId;
                 io.to(`user:${otherUserId}`).emit('message_notification', {
                     conversationId,
                     message: text,
                     senderName: socket.user.name || 'User',
                 });
+
+                // Send push notification if the other user is not in the conversation room
+                const convRoom = io.sockets.adapter.rooms.get(`conv:${conversationId}`);
+                const otherUserSockets = await io.in(`user:${otherUserId}`).fetchSockets();
+                const otherInRoom = otherUserSockets.some((s) => convRoom?.has(s.id));
+
+                if (!otherInRoom) {
+                    sendPushToUser(otherUserId, {
+                        title: socket.user.name || 'New Message',
+                        body: text.length > 100 ? text.substring(0, 100) + '…' : text,
+                        data: { type: 'chat', conversationId },
+                    }).catch(() => {});
+                }
             } catch (err) {
                 socket.emit('error', err.message);
             }
@@ -163,6 +225,11 @@ const initChatSocket = (io) => {
                 });
 
                 socket.emit('conversation_read', conversationId);
+
+                io.to(`conv:${conversationId}`).emit('messages_read', {
+                    conversationId,
+                    readBy: userId,
+                });
             } catch (err) {
                 socket.emit('error', err.message);
             }
@@ -256,7 +323,18 @@ const initChatSocket = (io) => {
 
                 socket.emit('conversation_started', conversation);
 
-                // Notify candidate
+                // Notify candidate via in-app notification
+                if (initialMessage) {
+                    createNotification({
+                        userId: candidateId,
+                        title: 'New Message',
+                        message: `${recruiter?.name || 'A recruiter'} started a conversation${jobTitle ? ` about ${jobTitle}` : ''}`,
+                        type: 'message',
+                        metadata: { conversationId: conversation.id, jobId },
+                    }).catch(() => {});
+                }
+
+                // Notify candidate via socket
                 io.to(`user:${candidateId}`).emit('new_conversation', {
                     conversation,
                     recruiterName: recruiter?.name,
@@ -267,7 +345,7 @@ const initChatSocket = (io) => {
         });
 
         socket.on('disconnect', () => {
-            console.log(`🔌 User disconnected: ${userId}`);
+            logger.info(`🔌 User disconnected: ${userId}`);
         });
     });
 };

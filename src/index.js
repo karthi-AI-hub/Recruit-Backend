@@ -11,6 +11,7 @@ const { Server } = require('socket.io');
 
 // Load env first
 const config = require('./config/env');
+const logger = require('./config/logger');
 
 // Import routes
 const authRoutes = require('./routes/auth.routes');
@@ -28,9 +29,12 @@ const subscriptionRoutes = require('./routes/subscription.routes');
 
 // Import middleware
 const errorHandler = require('./middleware/errorHandler');
+const sanitize = require('./middleware/sanitize');
 
 // Import Socket.io handler
 const initChatSocket = require('./socket/chat.socket');
+const { setIO } = require('./socket/io');
+const { initFirebase } = require('./config/firebase');
 
 // ─── APP SETUP ──────────────────────────────────────────
 const app = express();
@@ -39,9 +43,13 @@ const server = http.createServer(app);
 // ─── SOCKET.IO ──────────────────────────────────────────
 const io = new Server(server, {
     cors: {
-        origin: '*',
+        origin: "*",
+        credentials: true,
     },
 });
+
+// Store io globally so controllers / utils can emit events
+setIO(io);
 
 // Initialize chat socket handlers
 initChatSocket(io);
@@ -51,11 +59,13 @@ app.use(require('compression')()); // Gzip compression
 app.use(helmet({
     crossOriginResourcePolicy: { policy: 'cross-origin' },
 }));
-app.use(cors({ origin: '*', credentials: true }));
-app.use(morgan('dev'));
+app.use(cors({ origin: "*", credentials: true }));
+const isProduction = config.nodeEnv === 'production';
+app.use(isProduction ? morgan('combined', { stream: logger.stream }) : morgan('dev'));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
+app.use(sanitize); // Strip HTML/script tags from user input
 
 // Safety: ensure req.body is always at least an empty object
 app.use((req, _res, next) => {
@@ -67,16 +77,16 @@ app.use((req, _res, next) => {
 
 // Rate limiting
 const globalLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100, // Max 100 requests per window
+    windowMs: config.rateLimit.windowMs,
+    max: config.rateLimit.globalMax,
     standardHeaders: true,
     legacyHeaders: false,
     message: { success: false, message: 'Too many requests, please try again later' },
 });
 
 const authLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 10, // Max 10 login/register attempts
+    windowMs: config.rateLimit.windowMs,
+    max: config.rateLimit.authMax,
     standardHeaders: true,
     legacyHeaders: false,
     message: { success: false, message: 'Too many auth attempts, please try again later' },
@@ -103,13 +113,28 @@ app.use('/api/feedback', feedbackRoutes);
 app.use('/api/subscription', subscriptionRoutes);
 app.use('/api/chat', require('./routes/chat.routes')); // Added Chat Routes
 
-// Health check
-app.get('/', (req, res) => {
-    res.json({
-        success: true,
-        message: 'Recurite API is running',
+// Health check — includes DB & Redis connectivity
+app.get('/', async (req, res) => {
+    let dbOk = false;
+    let redisOk = false;
+    try {
+        await prisma.$queryRawUnsafe('SELECT 1');
+        dbOk = true;
+    } catch (_) {}
+    try {
+        if (redis && redis.status === 'ready') {
+            await redis.ping();
+            redisOk = true;
+        }
+    } catch (_) {}
+    const ok = dbOk; // Redis is optional
+    res.status(ok ? 200 : 503).json({
+        success: ok,
+        message: ok ? 'Recurite API is running' : 'Service degraded',
         timestamp: new Date().toISOString(),
         version: '1.0.0',
+        services: { database: dbOk, redis: redisOk },
+        uptime: Math.floor(process.uptime()),
     });
 });
 
@@ -127,16 +152,16 @@ app.use(errorHandler);
 // ─── START SERVER ───────────────────────────────────────
 const PORT = config.port;
 const { connectDB } = require('./config/database');
-const { connectRedis } = require('./config/redis');
+const { connectRedis, redis } = require('./config/redis');
+const { prisma } = require('./config/database');
 
 async function startServer() {
-    console.log('');
-    console.log('╔══════════════════════════════════════════════╗');
-    console.log('║        🚀 RECURITE API SERVER                ║');
-    console.log('╚══════════════════════════════════════════════╝');
-    console.log('');
-    console.log('  Connecting services...');
-    console.log('');
+    logger.info('');
+    logger.info('╔══════════════════════════════════════════════╗');
+    logger.info('║        🚀 RECURITE API SERVER                ║');
+    logger.info('╚══════════════════════════════════════════════╝');
+    logger.info('');
+    logger.info('  Connecting services...');
 
     // Connect to PostgreSQL
     await connectDB();
@@ -144,29 +169,34 @@ async function startServer() {
     // Connect to Redis (optional — app works without it)
     await connectRedis();
 
-    console.log('');
-    console.log('  ─────────────────────────────────────────────');
-    console.log(`  📝 Environment : ${config.nodeEnv}`);
-    console.log(`  🔗 Server      : http://localhost:${PORT}`);
-    console.log(`  💡 Health      : http://localhost:${PORT}/`);
-    console.log(`  🗄️  DB Studio   : npm run db:studio (port 5555)`);
-    console.log('  ─────────────────────────────────────────────');
-    console.log('');
+    // Initialise Firebase Admin (optional — push works only when configured)
+    initFirebase();
+
+    logger.info('  ─────────────────────────────────────────────');
+    logger.info(`  📝 Environment : ${config.nodeEnv}`);
+    logger.info(`  🔗 Server      : http://localhost:${PORT}`);
+    logger.info(`  💡 Health      : http://localhost:${PORT}/`);
+    logger.info(`  🗄️  DB Studio   : npm run db:studio (port 5555)`);
+    logger.info('  ─────────────────────────────────────────────');
 
     server.listen(PORT, () => {
-        console.log(`  ✅ Server listening on port ${PORT}`);
-        console.log('');
+        logger.info(`  ✅ Server listening on port ${PORT}`);
     });
 }
 
 startServer().catch((err) => {
-    console.error('❌ Failed to start server:', err);
+    logger.error('❌ Failed to start server:', err);
     process.exit(1);
 });
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
-    console.log('SIGTERM received. Shutting down...');
+    logger.info('SIGTERM received. Shutting down...');
+    server.close(() => process.exit(0));
+});
+
+process.on('SIGINT', () => {
+    logger.info('SIGINT received. Shutting down...');
     server.close(() => process.exit(0));
 });
 

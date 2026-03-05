@@ -2,6 +2,7 @@ const { prisma } = require('../config/database');
 const asyncHandler = require('../utils/asyncHandler');
 const ApiError = require('../utils/ApiError');
 const { paginate, paginationMeta } = require('../utils/pagination');
+const { sendPushToUser } = require('../utils/pushNotification');
 
 /**
  * POST /api/messages — Send a message (recruiter → candidate)
@@ -37,6 +38,13 @@ const sendMessage = asyncHandler(async (req, res) => {
             metadata: { messageId: message.id },
         },
     });
+
+    // Push notification
+    sendPushToUser(toUserId, {
+        title: 'New Message',
+        body: subject,
+        data: { type: 'message', messageId: message.id },
+    }).catch(() => {});
 
     res.status(201).json({
         success: true,
@@ -100,6 +108,13 @@ const sendBulkMessages = asyncHandler(async (req, res) => {
                 metadata: { messageId: msg.id },
             },
         });
+
+        // Push notification (fire-and-forget)
+        sendPushToUser(toUserId, {
+            title: 'New Message',
+            body: subject,
+            data: { type: 'message', messageId: msg.id },
+        }).catch(() => {});
     }
 
     res.status(201).json({

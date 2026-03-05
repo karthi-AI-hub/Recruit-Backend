@@ -5,7 +5,7 @@ const ApiError = require('../utils/ApiError');
 /**
  * Valid subscription plans
  */
-const VALID_PLANS = ['Normal', 'Premium'];
+const VALID_PLANS = ['Normal', 'Premium', 'Custom'];
 
 /**
  * Plan duration in days based on billing cycle
@@ -24,7 +24,7 @@ const subscribe = asyncHandler(async (req, res) => {
     const { planName, isYearly } = req.body;
 
     if (!planName || !VALID_PLANS.includes(planName)) {
-        throw ApiError.badRequest('Invalid or missing planName. Must be "Normal" or "Premium"');
+        throw ApiError.badRequest('Invalid or missing planName. Must be "Normal", "Premium", or "Custom"');
     }
 
     // Must be a recruiter with a company
@@ -163,6 +163,9 @@ const getStatus = asyncHandler(async (req, res) => {
             hasCompany: true,
             companyId: user.companyId,
             planName: user.company.subscriptionPlan,
+            planTier: user.company.subscriptionPlan
+                ? user.company.subscriptionPlan.split('(')[0].trim()
+                : null,
             status,
             trialEndsAt: user.company.trialEndsAt,
         },

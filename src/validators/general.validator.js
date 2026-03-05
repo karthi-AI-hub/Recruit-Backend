@@ -25,6 +25,11 @@ const updateProfile = Joi.object({
     isAvailable: Joi.boolean(),
     noticePeriod: Joi.string().trim().allow('', null),
     currentCtc: Joi.string().trim().allow('', null),
+    summary: Joi.string().trim().max(1000).allow('', null),
+    about: Joi.string().trim().max(1000).allow('', null),
+    github: Joi.string().trim().max(200).allow('', null),
+    linkedIn: Joi.string().trim().max(200).allow('', null),
+    portfolio: Joi.string().trim().max(200).allow('', null),
     isProfileHidden: Joi.boolean(),
 }).min(1);
 
