@@ -12,4 +12,3 @@ dist/
 *.jks
 *.keystore
 src/config/firebaseServiceAccountKey.json
-.env
