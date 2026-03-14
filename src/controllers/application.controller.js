@@ -5,6 +5,15 @@ const { paginate, paginationMeta } = require('../utils/pagination');
 const { invalidateCache } = require('../middleware/cache.middleware');
 const { createNotification } = require('../utils/notificationHelper');
 const { canViewDirectContact } = require('../utils/subscriptionAccess');
+const { TEAM_ROLES, requireRecruiterTeamRole } = require('../utils/recruiterTeamRole');
+
+const getRecruiterCompanyId = async (userId) => {
+    const recruiter = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { companyId: true },
+    });
+    return recruiter?.companyId || null;
+};
 
 /**
  * POST /api/applications — Job seeker applies (auth required → 401 triggers login modal)
@@ -195,13 +204,19 @@ const getApplicationById = asyncHandler(async (req, res) => {
 
     if (!application) throw ApiError.notFound('Application not found');
 
-    // Only applicant or job poster can view
-    if (application.userId !== req.user.id && application.job.postedById !== req.user.id) {
+    // Applicant can view own application. Recruiter can view if job belongs to recruiter's company.
+    let canViewAsRecruiter = false;
+    if (req.user.role === 'recruiter') {
+        const recruiterCompanyId = await getRecruiterCompanyId(req.user.id);
+        canViewAsRecruiter = !!recruiterCompanyId && application.job.companyId === recruiterCompanyId;
+    }
+
+    if (application.userId !== req.user.id && !canViewAsRecruiter) {
         throw ApiError.forbidden('Access denied');
     }
 
     let responseData = application;
-    if (application.job.postedById === req.user.id) {
+    if (canViewAsRecruiter) {
         const recruiter = await prisma.user.findUnique({
             where: { id: req.user.id },
             include: { company: true },
@@ -234,10 +249,13 @@ const getJobApplications = asyncHandler(async (req, res) => {
     const { status, page, limit } = req.query;
     const pagination = paginate(req.query);
 
-    // Verify job belongs to recruiter
+    // Verify job belongs to recruiter's company
+    const recruiterCompanyId = await getRecruiterCompanyId(req.user.id);
+    if (!recruiterCompanyId) throw ApiError.forbidden('No company linked for this recruiter');
+
     const job = await prisma.job.findUnique({ where: { id: req.params.jobId } });
     if (!job) throw ApiError.notFound('Job not found');
-    if (job.postedById !== req.user.id) throw ApiError.forbidden('Not your job');
+    if (job.companyId !== recruiterCompanyId) throw ApiError.forbidden('Not a job from your company');
 
     const recruiter = await prisma.user.findUnique({
         where: { id: req.user.id },
@@ -314,6 +332,12 @@ const getJobApplications = asyncHandler(async (req, res) => {
 const updateApplicationStatus = asyncHandler(async (req, res) => {
     const { status, recruiterMessage } = req.body;
 
+    await requireRecruiterTeamRole(
+        req.user.id,
+        [TEAM_ROLES.MANAGER, TEAM_ROLES.ADMIN],
+        'You don\'t have permission to change application status',
+    );
+
     if (!status) {
         throw ApiError.badRequest('status is required');
     }
@@ -324,7 +348,10 @@ const updateApplicationStatus = asyncHandler(async (req, res) => {
     });
 
     if (!application) throw ApiError.notFound('Application not found');
-    if (application.job.postedById !== req.user.id) throw ApiError.forbidden('Not your application');
+    const recruiterCompanyId = await getRecruiterCompanyId(req.user.id);
+    if (!recruiterCompanyId || application.job.companyId !== recruiterCompanyId) {
+        throw ApiError.forbidden('Not an application for your company');
+    }
     if (application.status === 'withdrawn') throw ApiError.badRequest('Cannot update a withdrawn application');
     if (application.status === 'hired') throw ApiError.badRequest('Cannot update a hired application');
     if (application.status === status) throw ApiError.badRequest('Status is already set to this value');

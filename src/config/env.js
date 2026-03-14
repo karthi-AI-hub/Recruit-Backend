@@ -39,4 +39,11 @@ module.exports = {
         pass: process.env.SMTP_PASS || '',
         from: process.env.SMTP_FROM || 'noreply@recruit.app',
     },
+    invite: {
+        // Android deep link default (can be overridden with HTTPS web URL in env)
+        // Example values:
+        // - recruit://team-invite
+        // - https://your-app-domain.com
+        acceptBaseUrl: process.env.INVITE_ACCEPT_BASE_URL || 'recruit://team-invite',
+    },
 };

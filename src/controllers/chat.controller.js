@@ -13,6 +13,14 @@ const resolveUserName = async (userId, fallbackName) => {
     return user?.name || 'User';
 };
 
+const getRecruiterCompanyId = async (userId) => {
+    const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { companyId: true },
+    });
+    return user?.companyId || null;
+};
+
 /**
  * POST /api/chat/start
  * Start a conversation (Recruiter only)
@@ -25,24 +33,28 @@ const startConversation = asyncHandler(async (req, res) => {
         throw ApiError.badRequest('Candidate ID and initial message are required');
     }
 
-    // Check if conversation already exists
+    const recruiterCompanyId = await getRecruiterCompanyId(recruiterId);
+
+    // Check if conversation already exists within company scope
     let conversation;
     if (jobId) {
-        conversation = await prisma.conversation.findUnique({
+        conversation = await prisma.conversation.findFirst({
             where: {
-                recruiterId_candidateId_jobId: {
-                    recruiterId,
-                    candidateId,
-                    jobId
-                }
+                candidateId,
+                jobId,
+                ...(recruiterCompanyId
+                    ? { recruiter: { companyId: recruiterCompanyId } }
+                    : { recruiterId }),
             }
         });
     } else {
         conversation = await prisma.conversation.findFirst({
             where: {
-                recruiterId,
                 candidateId,
-                jobId: null
+                jobId: null,
+                ...(recruiterCompanyId
+                    ? { recruiter: { companyId: recruiterCompanyId } }
+                    : { recruiterId }),
             }
         });
     }
@@ -128,6 +140,7 @@ const startConversation = asyncHandler(async (req, res) => {
         companyLogo: fullConversation.job?.companyLogo || fullConversation.recruiter?.company?.logo,
         lastMessage: fullConversation.lastMessage,
         lastMessageAt: fullConversation.lastMessageAt,
+        lastMessageBy: fullConversation.lastMessageBy,
         unreadCount: 0,
         isActive: fullConversation.isActive,
     };
@@ -147,7 +160,15 @@ const getConversations = asyncHandler(async (req, res) => {
     const isRecruiter = req.user.role === 'recruiter';
     const { skip, take, page, limit } = paginate(req.query);
 
-    const where = isRecruiter ? { recruiterId: userId } : { candidateId: userId };
+    let where;
+    if (isRecruiter) {
+        const recruiterCompanyId = await getRecruiterCompanyId(userId);
+        where = recruiterCompanyId
+            ? { recruiter: { companyId: recruiterCompanyId } }
+            : { recruiterId: userId };
+    } else {
+        where = { candidateId: userId };
+    }
 
     const [conversations, total] = await Promise.all([
         prisma.conversation.findMany({
@@ -238,10 +259,18 @@ const getMessages = asyncHandler(async (req, res) => {
     // Verify access
     const conversation = await prisma.conversation.findUnique({
         where: { id: conversationId },
+        include: {
+            recruiter: { select: { companyId: true } },
+        },
     });
 
     if (!conversation) throw ApiError.notFound('Conversation not found');
-    if (conversation.recruiterId !== userId && conversation.candidateId !== userId) {
+    let canAccess = conversation.recruiterId === userId || conversation.candidateId === userId;
+    if (!canAccess && req.user.role === 'recruiter') {
+        const recruiterCompanyId = await getRecruiterCompanyId(userId);
+        canAccess = !!recruiterCompanyId && recruiterCompanyId === conversation.recruiter?.companyId;
+    }
+    if (!canAccess) {
         throw ApiError.forbidden('Access denied');
     }
 
@@ -279,15 +308,23 @@ const sendMessage = asyncHandler(async (req, res) => {
     // Verify conversation
     const conversation = await prisma.conversation.findUnique({
         where: { id: conversationId },
+        include: {
+            recruiter: { select: { companyId: true } },
+        },
     });
 
     if (!conversation) throw ApiError.notFound('Conversation not found');
-    if (conversation.recruiterId !== userId && conversation.candidateId !== userId) {
+    let canAccess = conversation.recruiterId === userId || conversation.candidateId === userId;
+    if (!canAccess && req.user.role === 'recruiter') {
+        const recruiterCompanyId = await getRecruiterCompanyId(userId);
+        canAccess = !!recruiterCompanyId && recruiterCompanyId === conversation.recruiter?.companyId;
+    }
+    if (!canAccess) {
         throw ApiError.forbidden('Access denied');
     }
 
     // Determine counts to update
-    const isRecruiter = userId === conversation.recruiterId;
+    const isRecruiter = req.user.role === 'recruiter';
 
     // Create message AND update conversation in transaction
     const [message, updatedConv] = await prisma.$transaction([
@@ -328,14 +365,22 @@ const markAsRead = asyncHandler(async (req, res) => {
 
     const conversation = await prisma.conversation.findUnique({
         where: { id: conversationId },
+        include: {
+            recruiter: { select: { companyId: true } },
+        },
     });
 
     if (!conversation) throw ApiError.notFound('Conversation not found');
-    if (conversation.recruiterId !== userId && conversation.candidateId !== userId) {
+    let canAccess = conversation.recruiterId === userId || conversation.candidateId === userId;
+    if (!canAccess && req.user.role === 'recruiter') {
+        const recruiterCompanyId = await getRecruiterCompanyId(userId);
+        canAccess = !!recruiterCompanyId && recruiterCompanyId === conversation.recruiter?.companyId;
+    }
+    if (!canAccess) {
         throw ApiError.forbidden('Access denied');
     }
 
-    const isRecruiter = userId === conversation.recruiterId;
+    const isRecruiter = req.user.role === 'recruiter';
 
     // Reset unread count
     await prisma.conversation.update({

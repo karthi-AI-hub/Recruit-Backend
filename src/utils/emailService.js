@@ -56,4 +56,50 @@ async function sendPasswordResetEmail(to, otp) {
     }
 }
 
-module.exports = { sendPasswordResetEmail };
+/**
+ * Send team invite email containing secure accept link.
+ */
+async function sendTeamInviteEmail({
+    to,
+    inviterName,
+    companyName,
+    role,
+    acceptUrl,
+}) {
+    const subject = `Recruit - Team Invite from ${companyName || 'a company'}`;
+    const html = `
+        <div style="font-family:sans-serif;max-width:560px;margin:auto;padding:24px;line-height:1.5">
+            <h2 style="color:#0F766E;margin-bottom:8px">You are invited to join a recruiter team</h2>
+            <p style="margin:0 0 12px 0"><strong>${inviterName || 'A recruiter'}</strong> invited you to collaborate in <strong>${companyName || 'their company'}</strong>.</p>
+            <p style="margin:0 0 16px 0">Role: <strong>${role}</strong></p>
+
+            <a href="${acceptUrl}" style="display:inline-block;background:#0F766E;color:#fff;text-decoration:none;padding:12px 18px;border-radius:10px;font-weight:700">
+                Accept Collaboration Invite
+            </a>
+
+            <p style="margin:18px 0 8px 0;color:#6B7280;font-size:13px">If the button does not work, copy this link:</p>
+            <p style="word-break:break-all;color:#374151;font-size:13px">${acceptUrl}</p>
+            <p style="color:#6B7280;font-size:12px">If you did not expect this invite, you can ignore this email.</p>
+        </div>
+    `;
+
+    const mailer = getTransporter();
+    if (!mailer) {
+        logger.info(`[DEV] Team invite for ${to}: ${acceptUrl}`);
+        return;
+    }
+
+    try {
+        await mailer.sendMail({
+            from: config.smtp.from,
+            to,
+            subject,
+            html,
+        });
+        logger.info(`Team invite email sent to ${to}`);
+    } catch (err) {
+        logger.error(`Failed to send team invite email to ${to}: ${err.message}`);
+    }
+}
+
+module.exports = { sendPasswordResetEmail, sendTeamInviteEmail };

@@ -5,8 +5,22 @@ const { paginate, paginationMeta } = require('../utils/pagination');
 const { redis } = require('../config/redis');
 const { isCompanyProfileComplete } = require('../utils/companyProfile');
 const { normalizeSkillList, expandSkillQueryToCanonicalSkills } = require('../utils/skillNormalization');
+const { TEAM_ROLES, requireRecruiterTeamRole } = require('../utils/recruiterTeamRole');
 
 const CACHE_TTL = 300; // 5 minutes
+
+const getRecruiterCompanyContext = async (userId) => {
+    const recruiter = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { companyId: true },
+    });
+
+    if (!recruiter?.companyId) {
+        throw ApiError.forbidden('You must be linked to a company to access recruiter jobs');
+    }
+
+    return recruiter;
+};
 
 /**
  * GET /api/jobs — Public (guest OK)
@@ -264,6 +278,12 @@ const searchJobs = asyncHandler(async (req, res) => {
 const createJob = asyncHandler(async (req, res) => {
     const data = req.body;
 
+    await requireRecruiterTeamRole(
+        req.user.id,
+        [TEAM_ROLES.MANAGER, TEAM_ROLES.ADMIN],
+        'You don\'t have permission to post jobs.',
+    );
+
     // ── Subscription Guard ──────────────────────────────────
     const recruiter = await prisma.user.findUnique({
         where: { id: req.user.id },
@@ -340,8 +360,9 @@ const createJob = asyncHandler(async (req, res) => {
 const getRecruiterJobs = asyncHandler(async (req, res) => {
     const { status, page, limit } = req.query;
     const pagination = paginate(req.query);
+    const recruiter = await getRecruiterCompanyContext(req.user.id);
 
-    const where = { postedById: req.user.id };
+    const where = { companyId: recruiter.companyId };
     if (status) where.status = status;
 
     const [jobs, total] = await Promise.all([
@@ -371,10 +392,16 @@ const updateJob = asyncHandler(async (req, res) => {
     if (!req.body || Object.keys(req.body).length === 0) {
         throw ApiError.badRequest('No fields to update');
     }
+    await requireRecruiterTeamRole(
+        req.user.id,
+        [TEAM_ROLES.MANAGER, TEAM_ROLES.ADMIN],
+        'You don\'t have permission to update jobs.',
+    );
 
+    const recruiter = await getRecruiterCompanyContext(req.user.id);
     const job = await prisma.job.findUnique({ where: { id: req.params.id } });
     if (!job) throw ApiError.notFound('Job not found');
-    if (job.postedById !== req.user.id) throw ApiError.forbidden('Not your job');
+    if (job.companyId !== recruiter.companyId) throw ApiError.forbidden('Not a job from your company');
 
     const updateData = { ...req.body };
     if (Object.prototype.hasOwnProperty.call(updateData, 'skills')) {
@@ -408,9 +435,16 @@ const updateJob = asyncHandler(async (req, res) => {
  * DELETE /api/recruiter/jobs/:id
  */
 const deleteJob = asyncHandler(async (req, res) => {
+    await requireRecruiterTeamRole(
+        req.user.id,
+        [TEAM_ROLES.MANAGER, TEAM_ROLES.ADMIN],
+        'You don\'t have permission to delete jobs.',
+    );
+
+    const recruiter = await getRecruiterCompanyContext(req.user.id);
     const job = await prisma.job.findUnique({ where: { id: req.params.id } });
     if (!job) throw ApiError.notFound('Job not found');
-    if (job.postedById !== req.user.id) throw ApiError.forbidden('Not your job');
+    if (job.companyId !== recruiter.companyId) throw ApiError.forbidden('Not a job from your company');
 
     await prisma.job.update({ where: { id: req.params.id }, data: { isDeleted: true } });
 

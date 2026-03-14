@@ -14,7 +14,8 @@ router.get('/company/:id', recruiterController.getCompanyProfile);
 router.get('/team', auth, roleGuard('recruiter'), recruiterController.getTeamMembers);
 router.post('/team/invite', auth, roleGuard('recruiter'), recruiterController.inviteTeamMember);
 router.get('/team/invites', auth, roleGuard('recruiter'), recruiterController.getTeamInvites);
-router.post('/team/invite/accept', auth, roleGuard('recruiter'), recruiterController.acceptTeamInvite);
+router.post('/team/invite/preview-link', recruiterController.previewTeamInviteByToken);
+router.post('/team/invite/accept-link', recruiterController.acceptTeamInviteByToken);
 router.delete('/team/:memberId', auth, roleGuard('recruiter'), recruiterController.removeTeamMember);
 
 module.exports = router;
